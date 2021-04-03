@@ -123,6 +123,8 @@ uint32_t LatitudeBinary, LongitudeBinary;
 uint16_t altitudeGps;
 uint8_t hdopGps;
 boolean confirmed = false;
+double last_lat;
+double last_lng;
 
 void PayloadNow()
 {
@@ -163,6 +165,14 @@ void PayloadNow()
                 port += (i + 1);
                 break;
             }
+        }
+
+        if (gps.distanceBetween(gps.location.lat(), gps.location.lng(), last_lat, last_lng) < 25) //test, if location has changed significantly
+            port += 100;
+        else
+        {
+            last_lat = gps.location.lat();
+            last_lng = gps.location.lng();
         }
 
         LMIC_setTxData2(port, txBuffer, sizeof(txBuffer), confirmed);

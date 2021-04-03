@@ -1,17 +1,20 @@
 #include <Arduino.h>
 
-#define LED 2
+#define LED 4
+#define ButtonPin 38
 
-// OLED
-#include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+//Power
+#include <axp20x.h>
+AXP20X_Class axp;
+#define I2C_SDA 21
+#define I2C_SCL 22
+#define PMU_IRQ 35
 
 //GPS
 #include <TinyGPS++.h>
 #include <HardwareSerial.h>
 
-#define GPS_RX 35
+#define GPS_RX 12
 #define GPS_TX 34
 #define GPS_Baud 9600
 
@@ -23,22 +26,15 @@ HardwareSerial ss(1);
 #include <hal/hal.h>
 #include <SPI.h>
 
-// OLED Pins
-#define OLED_SCL 15 // GPIO 15
-#define OLED_SDA 4  // GPIO  4
-#define OLED_RST 16 // GPIO 16
-
-// define the display type that we use
-Adafruit_SSD1306 display(128, 64, &Wire, OLED_RST);
-
 // LoRa Pins
-#define LORA_RST 14  // GPIO 14
-#define LORA_CS 18   // GPIO 18
-#define LORA_DIO0 26 // GPIO 26
-#define LORA_DIO1 33 // GPIO 33
-#define LORA_DIO2 32 // GPIO 32
+#define LoRa_RST 23
+#define LoRa_CS 18
+#define LoRa_DIO0 26
+#define LoRa_DIO1 33
+#define LoRa_DIO2 32
 
 #include "credentials.h"
+#include "locations.h"
 
 // These callbacks are only used in over-the-air activation, so they are
 // left empty here (we cannot leave them out completely unless
@@ -57,23 +53,61 @@ unsigned TX_INTERVAL = 20;
 
 // Pin mapping
 const lmic_pinmap lmic_pins = {
-    .nss = LORA_CS,
+    .nss = LoRa_CS,
     .rxtx = LMIC_UNUSED_PIN,
-    .rst = LORA_RST,
-    .dio = {LORA_DIO0, LORA_DIO1, LORA_DIO2},
+    .rst = LoRa_RST,
+    .dio = {LoRa_DIO0, LoRa_DIO1, LoRa_DIO2},
 };
+
+void blinkLED(unsigned long duration);
 
 void gps_setup()
 {
-    ss.begin(GPS_Baud, SERIAL_8N1, GPS_RX, GPS_TX);
+
+    //https://github.com/LilyGO/TTGO-T-Beam/blob/master/GPS-T22_v1.0-20190612/GPS-T22_v1.0-20190612.ino
+
+    Wire.begin(21, 22);
+    if (!axp.begin(Wire, AXP192_SLAVE_ADDRESS))
+    {
+        Serial.println("AXP192 Begin PASS");
+    }
+    else
+    {
+        Serial.println("AXP192 Begin FAIL");
+    }
+
+    //axp.setLDO3Voltage(3300); //GPS  VDD
+
+    axp.setPowerOutPut(AXP192_LDO2, AXP202_ON);
+    axp.setPowerOutPut(AXP192_LDO3, AXP202_ON); //GPS
+    axp.setPowerOutPut(AXP192_DCDC2, AXP202_ON);
+    axp.setPowerOutPut(AXP192_EXTEN, AXP202_ON);
+    axp.setPowerOutPut(AXP192_DCDC1, AXP202_ON);
+    ss.begin(9600, SERIAL_8N1, 34, 12); //17-TX 18-RX
+    //ss.begin(9600, SERIAL_8N1, 34, 12); //17-TX 18-RX
+    //ss.begin(9600, SERIAL_8N1, 12, 34); //false
+
+    //ss.begin(GPS_Baud, SERIAL_8N1, GPS_RX, GPS_TX);
     Serial.print(F("TinyGPS++ library v. "));
     Serial.println(TinyGPSPlus::libraryVersion());
     Serial.println();
+
+    // byte message[] = {0xB5, 0x62, 0x06, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 0x00, 0xD0, 0x08, 0x00, 0x00,
+    //                   0x80, 0x25, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x9A, 0x79};
+    // for (int i = 0; i < sizeof(message); i++)
+    //     ss.write(message[i]);
+
     while (false)
-        while (ss.available() > 0)
+    {
+        while (Serial.available())
         {
-            Serial.print(ss.read());
+            ss.print(Serial.read());
         }
+        while (ss.available())
+        {
+            Serial.write(ss.read());
+        }
+    }
 }
 
 void gps_loop()
@@ -84,20 +118,20 @@ void gps_loop()
         gps.encode(ss.read());
     }
 }
-
 uint8_t txBuffer[9];
 uint32_t LatitudeBinary, LongitudeBinary;
 uint16_t altitudeGps;
 uint8_t hdopGps;
+boolean confirmed = false;
 
 void PayloadNow()
 {
-    boolean confirmed = false;
 
     //if (button_count() == 1) confirmed = true;
 
-    if (gps.location.isValid())
+    if (gps.location.age() < 10000)
     {
+        Serial.println("GPS valid");
 
         LatitudeBinary = ((gps.location.lat() + 90) / 180) * 16777215;
         LongitudeBinary = ((gps.location.lng() + 180) / 360) * 16777215;
@@ -117,41 +151,40 @@ void PayloadNow()
         if (gps.hdop.isValid())
             hdopGps = gps.hdop.hdop() * 10;
         else
-            hdopGps = 40.0 * 10;
+            hdopGps = 144;
         txBuffer[8] = hdopGps & 0xFF;
 
-        LMIC_setTxData2(1, txBuffer, sizeof(txBuffer), confirmed);
+        u1_t port = 21;
+
+        for (int i = 0; i < sizeof(geofence); i++)
+        {
+            if (gps.location.lat() > geofence[i].lat_min && gps.location.lat() < geofence[i].lat_max && gps.location.lng() > geofence[i].lng_min && gps.location.lng() < geofence[i].lng_max)
+            {
+                port += (i + 1);
+                break;
+            }
+        }
+
+        LMIC_setTxData2(port, txBuffer, sizeof(txBuffer), confirmed);
     }
     else
     {
+        Serial.println("GPS not valid");
         LMIC_setTxData2(1, txBuffer, 0, confirmed);
     }
+    confirmed = false;
 }
 
-void showDatarate()
+void blinkShort(int times)
 {
-    display.print("Datarate: ");
-    switch (LMIC.datarate)
+    digitalWrite(LED, HIGH);
+    delay(300);
+    for (int i = 0; i < times; i++)
     {
-    case DR_SF7:
-        display.print("DR_SF7");
-        break;
-
-    case DR_SF8:
-        display.print("DR_SF8");
-        break;
-
-    case DR_SF9:
-        display.print("DR_SF9");
-        break;
-
-    case DR_SF10:
-        display.print("DR_SF10");
-        break;
-
-    default:
-        display.print("DR_Error");
-        break;
+        digitalWrite(LED, LOW);
+        delay(50);
+        digitalWrite(LED, HIGH);
+        delay(150);
     }
 }
 
@@ -162,33 +195,30 @@ void switchDR()
     {
     case DR_SF10:
         actual = DR_SF7;
-        TX_INTERVAL = 10; //8-200
+        TX_INTERVAL = 20; //8-200
+        Serial.println(F("Switching Datarate to DR_SF7"));
+        blinkShort(1);
         break;
     case DR_SF9:
         actual = DR_SF10;
         TX_INTERVAL = 80; //60-1200
+        Serial.println(F("Switching Datarate to DR_SF10"));
+        blinkShort(4);
         break;
     case DR_SF8:
         actual = DR_SF9;
         TX_INTERVAL = 40; //30-800
+        Serial.println(F("Switching Datarate to DR_SF9"));
+        blinkShort(3);
         break;
     default: //DR_SF7
         actual = DR_SF8;
         TX_INTERVAL = 20; //15-400
+        Serial.println(F("Switching Datarate to DR_SF8"));
+        blinkShort(2);
         break;
     }
     LMIC_setDrTxpow(actual, 14);
-}
-
-void showFrequency()
-{
-    display.print("Channel: ");
-    display.print(LMIC.txChnl);
-    char frequency[20];
-    float fre = LMIC.freq;
-    fre /= 1000000;
-    sprintf(frequency, " Freq %6.2f MHz", fre);
-    //display.print(frequency);
 }
 
 void do_send(osjob_t *j)
@@ -203,6 +233,7 @@ void do_send(osjob_t *j)
         // Prepare upstream data transmission at the next possible time.
         //sprintf(mydata, "l%5u", packetNumber);
         //LMIC_setTxData2(1, (xref2u1_t)mydata, sizeof(mydata) - 1, 0);
+        blinkLED(1000);
         PayloadNow();
         Serial.println(F("Packet queued"));
         //packetNumber++;
@@ -234,7 +265,10 @@ void onEvent(ev_t ev)
     case EV_TXCOMPLETE:
         Serial.println(F("EV_TXCOMPLETE (includes waiting for RX windows)"));
         if (LMIC.txrxFlags & TXRX_ACK)
+        {
             Serial.println(F("Received ack"));
+            blinkLED(3000);
+        }
         if (LMIC.dataLen)
         {
             Serial.print(F("Received "));
@@ -269,6 +303,7 @@ void onEvent(ev_t ev)
 void setup()
 {
     pinMode(LED, OUTPUT);
+    pinMode(ButtonPin, INPUT);
     // init packet counter
     sprintf(mydata, "l%5u", packetNumber);
 
@@ -276,14 +311,6 @@ void setup()
     Serial.println(F("Starting"));
 
     gps_setup();
-
-    // set up the display
-    Wire.begin(OLED_SDA, OLED_SCL);
-    display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
-    display.setTextColor(WHITE);
-    display.setTextSize(1);
-    display.setCursor(0, 0);
-    display.display();
 
     // LMIC init
     os_init();
@@ -340,12 +367,12 @@ void setup()
     LMIC_setDrTxpow(DR_SF7, 14);
 }
 
-bool Button = 1;
+bool Button = 0;
 unsigned long ButtonTime;
 
 void parseButton()
 {
-    if (!digitalRead(0))
+    if (!digitalRead(ButtonPin))
     {
         if (!Button)
         {
@@ -378,6 +405,7 @@ void parseButton()
         if (millis() - ButtonTime < 300)
         {
             Serial.println("got 1");
+            confirmed = true;
             //param++;
         }
         else if (millis() - ButtonTime < 2000)
@@ -399,104 +427,30 @@ void parseButton()
     }
 }
 
-void displayTimestamp()
-{
-    uint32_t seconds = millis() / 1000;
-    uint32_t minutes = seconds / 60;
-    seconds %= 60;
-    uint32_t hours = minutes / 60;
-    minutes %= 60;
-    if (hours < 10)
-        display.print("0");
-    display.print(hours);
-    display.print(":");
-    if (minutes < 10)
-        display.print("0");
-    display.print(minutes);
-    display.print(":");
-    if (seconds < 10)
-        display.print("0");
-    display.print(seconds);
-}
-
 unsigned long Time1, Timed;
-
-void updateDisplay()
-{
-    display.clearDisplay();
-    display.setCursor(0, 0);
-    display.print("APB:  ");
-
-    //display.print("send");
-    unsigned long remaining = 1000 * TX_INTERVAL + Time1 - millis();
-    float delay = float(remaining) / 1000;
-    if (delay < 10)
-        display.print(" ");
-    display.print(delay, 1);
-    display.print("  ");
-    displayTimestamp();
-    display.println();
-
-    float percent = 80 * (float(remaining) / (1000 * TX_INTERVAL));
-    display.drawRect(20, 9, 80, 5, SSD1306_WHITE);
-    display.fillRect(20, 9, int(percent), 5, SSD1306_WHITE);
-
-    display.println();
-    showDatarate();
-    display.println();
-    showFrequency();
-    display.println();
-    display.println();
-
-    display.print("send: ");
-    //display.print(mydata);
-    for (int i = 0; i < sizeof(txBuffer); i++)
-        display.print(txBuffer[i], HEX);
-    display.println();
-
-    // display.print("Data: ");
-    // display.print(LoRa.packetRssi());
-    // display.print(" ->");
-    // display.println(pow(10, (65 - LoRa.packetRssi()) / (10 * 3)) / 1000, 0);
-    // display.print(RecivedData);
-    // display.drawRect(0, 60, int(signalStrength()), 4, SSD1306_WHITE);
-
-    //display.drawLine(5, 5, 115, 55, SSD1306_WHITE);
-    //display.fillRect(2, 40, 3, 20, SSD1306_WHITE);
-    //display.drawRect(5, 40, 3, 10, SSD1306_WHITE);
-    //display.drawRect(9, 40-15, 3, 15, SSD1306_WHITE);
-
-    display.display();
-}
 
 unsigned long LEDIntervall;
 
 void blinkLED(unsigned long duration)
 {
-    digitalWrite(LED, HIGH);
+    digitalWrite(LED, LOW);
     LEDIntervall = millis() + duration;
 }
 
 void updateLED()
 {
     if (LEDIntervall < millis())
-        digitalWrite(LED, LOW);
+        digitalWrite(LED, HIGH);
 }
 
 void loop()
 {
     parseButton();
-    if (millis() - Timed > 80)
-    {
-        Timed = millis();
-        updateDisplay();
-    }
 
     if (millis() - Time1 > 1000 * TX_INTERVAL)
     {
         Time1 = millis();
         do_send(&sendjob);
-        blinkLED(300);
     }
 
     gps_loop();

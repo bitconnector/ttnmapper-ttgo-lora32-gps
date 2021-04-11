@@ -158,7 +158,7 @@ void PayloadNow()
 
         u1_t port = 21;
 
-        for (int i = 0; i < sizeof(geofence); i++)
+        for (int i = 0; i < (sizeof(geofence) / sizeof(Geofence)); i++)
         {
             if (gps.location.lat() > geofence[i].lat_min && gps.location.lat() < geofence[i].lat_max && gps.location.lng() > geofence[i].lng_min && gps.location.lng() < geofence[i].lng_max)
             {
